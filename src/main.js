@@ -1,4 +1,4 @@
-// PropertyFinder.ae Agent Scraper - Production-Ready Optimized Version
+// PropertyFinder.ae Agent Scraper - Production-Ready Optimized Version  
 import { Actor, log } from 'apify';
 import { CheerioCrawler, gotScraping } from 'crawlee';
 import { load } from 'cheerio';
@@ -98,26 +98,47 @@ const extractNextData = (html) => {
             return null;
         }
 
+        // Log available keys for debugging
+        const availableKeys = Object.keys(pageProps);
+        log.debug('📋 Available pageProps keys:', { keys: availableKeys.join(', ') });
+
         // Check all possible data locations for agents/brokers
-        const agents = pageProps.brokers || pageProps.agents ||
-            pageProps.searchResult?.brokers || pageProps.searchResult?.agents ||
+        // CRITICAL FIX: PropertyFinder stores agents at pageProps.agents.data
+        const agents = pageProps.agents?.data || pageProps.brokers?.data ||
+            pageProps.searchResult?.agents?.data || pageProps.searchResult?.brokers?.data ||
+            pageProps.searchResults?.agents?.data || pageProps.searchResults?.brokers?.data ||
+            pageProps.agents || pageProps.brokers ||
             pageProps.data?.brokers || pageProps.data?.agents ||
             pageProps.initialData?.brokers || pageProps.initialData?.agents ||
-            pageProps.serverState?.brokers || pageProps.serverState?.agents ||
+            pageProps.results || pageProps.items || pageProps.list ||
             pageProps.broker || pageProps.agent;
 
         // Handle single agent (detail page) vs array (listing page)
         const agentArray = Array.isArray(agents) ? agents : (agents ? [agents] : null);
 
         if (!agentArray || agentArray.length === 0) {
-            log.debug('No agents in __NEXT_DATA__', {
-                availableKeys: Object.keys(pageProps).slice(0, 10).join(', ')
+            log.warning('⚠️ No agents array found in __NEXT_DATA__', {
+                availableKeys: availableKeys.slice(0, 15).join(', '),
+                hasAgents: !!pageProps.agents,
+                hasAgentsData: !!pageProps.agents?.data,
+                hasSearchResult: !!pageProps.searchResult,
             });
             return null;
         }
 
-        log.info(`✓ __NEXT_DATA__ extraction successful: ${agentArray.length} agents found`);
-        return parseNextDataAgents(agentArray);
+        log.info(`✅ __NEXT_DATA__ raw data: ${agentArray.length} agents found`);
+        const parsedAgents = parseNextDataAgents(agentArray);
+        log.info(`✅ __NEXT_DATA__ after parsing: ${parsedAgents.length} agents ready to save`);
+
+        if (parsedAgents.length === 0 && agentArray.length > 0) {
+            log.warning('⚠️ All agents filtered out during parsing!', {
+                sampleKeys: agentArray[0] ? Object.keys(agentArray[0]).slice(0, 25).join(', ') : 'N/A',
+                sampleId: agentArray[0]?.id,
+                sampleName: agentArray[0]?.name
+            });
+        }
+
+        return parsedAgents;
 
     } catch (err) {
         log.warning('__NEXT_DATA__ extraction failed', { error: err.message, stack: err.stack });
@@ -126,13 +147,14 @@ const extractNextData = (html) => {
 };
 
 const parseNextDataAgents = (agents) => {
-    return agents.map(agent => {
+    return agents.map((agent, index) => {
         try {
             // Build profile URL from slug or id
             const slug = agent.slug || agent.name?.toLowerCase().replace(/\s+/g, '-');
-            const agentId = agent.id || agent.agent_id || agent.broker_id;
-            const profileUrl = agent.url || agent.profile_url || agent.href ||
-                (slug && agentId ? `https://www.propertyfinder.ae/en/agent/${slug}-${agentId}` : null);
+            const agentId = agent.id || agent.agent_id || agent.broker_id || agent.brokerId;
+            const profileUrl = agent.url || agent.profile_url || agent.profileUrl || agent.href ||
+                (slug && agentId ? `https://www.propertyfinder.ae/en/agent/${slug}-${agentId}` :
+                    agentId ? `https://www.propertyfinder.ae/en/agent/${agentId}` : null);
 
             // Extract transaction data
             const transactions = [];
@@ -141,7 +163,7 @@ const parseNextDataAgents = (agents) => {
                     transactions.push({
                         propertyType: tx.propertyType || tx.property_type,
                         location: tx.location?.name || tx.location,
-                        dealType: tx.dealType || tx.deal_type, // Sale/Rent
+                        dealType: tx.dealType || tx.deal_type,
                         price: tx.price,
                         date: tx.date || tx.transactionDate || tx.transaction_date,
                     });
@@ -158,7 +180,7 @@ const parseNextDataAgents = (agents) => {
                 // Contact Information
                 email: agent.email || agent.contact?.email || agent.email_address,
                 phone: agent.phone || agent.mobile || agent.contact_number || agent.contact?.phone || agent.telephone,
-                whatsapp: agent.whatsapp || agent.whatsappNumber || agent.whatsapp_number || agent.contact?.whatsapp,
+                whatsapp: agent.whatsapp || agent.whatsappPhone || agent.whatsappNumber || agent.whatsapp_number || agent.contact?.whatsapp,
 
                 // Professional Details
                 position: agent.position || agent.jobTitle || agent.job_title || agent.role,
@@ -168,49 +190,67 @@ const parseNextDataAgents = (agents) => {
                 companyAddress: agent.broker?.address || agent.company?.address || agent.office_address,
 
                 // Personal Details
-                profileImage: toAbsoluteUrl(agent.image || agent.photo || agent.avatar || agent.profile_image || agent.picture),
-                nationality: agent.nationality?.name || agent.nationality || agent.country,
-                languages: Array.isArray(agent.languages) ? agent.languages :
+                profileImage: toAbsoluteUrl(agent.image?.links?.desktop || agent.image?.path || agent.image ||
+                    agent.photo || agent.avatar || agent.profile_image || agent.picture),
+                nationality: agent.nationality?.name || agent.nationality?.code || agent.nationality || agent.country,
+                languages: Array.isArray(agent.languages) ? agent.languages.map(l => l.name || l) :
                     (agent.languages ? String(agent.languages).split(',').map(l => l.trim()) : null),
 
                 // Location & Areas
                 location: agent.location?.name || agent.city || agent.area || agent.location || agent.region,
+                topLocations: Array.isArray(agent.topLocations) ? agent.topLocations : null,
 
                 // Performance Metrics
-                totalListings: agent.total_listings || agent.totalActiveProperties || agent.property_count ||
-                    agent.listings_count || agent.properties_count || agent.listing_count,
-                activeListings: agent.active_listings || agent.activeListings || agent.active_properties || agent.active_count,
-                rentListings: agent.rentListings || agent.propertiesForRent || agent.rent_count,
-                saleListings: agent.saleListings || agent.propertiesForSale || agent.sale_count,
+                totalListings: agent.totalProperties || agent.total_listings || agent.totalActiveProperties ||
+                    agent.property_count || agent.listings_count || agent.properties_count,
+                activeListings: agent.active_listings || agent.activeListings || agent.active_properties,
+                rentListings: agent.propertiesResidentialForRentCount || agent.rentListings || agent.propertiesForRent,
+                saleListings: agent.propertiesResidentialForSaleCount || agent.saleListings || agent.propertiesForSale,
+                commercialRentListings: agent.propertiesCommercialForRentCount,
+                commercialSaleListings: agent.propertiesCommercialForSaleCount,
 
                 // Ratings & Reviews
-                rating: agent.rating || agent.average_rating || agent.score || agent.stars,
-                reviewsCount: agent.reviews_count || agent.reviewsCount || agent.total_reviews || agent.review_count || agent.reviews,
+                rating: agent.averageRating || agent.rating || agent.average_rating || agent.score || agent.stars,
+                reviewsCount: agent.reviewCount || agent.reviews_count || agent.reviewsCount || agent.total_reviews,
+                ratingDistribution: agent.ratingDistribution,
                 ranking: agent.ranking || agent.rank || agent.position_rank,
 
                 // Experience & Credentials
+                experienceSince: agent.experienceSince,
                 experience: agent.experience_years || agent.yearsOfExperience || agent.years_of_experience ||
-                    agent.experience || agent.years,
-                brokerPermitNo: agent.broker_permit_no || agent.licenseNumber || agent.license_number ||
-                    agent.rera_permit || agent.permit_number || agent.license || agent.registration_no || agent.brn,
+                    (agent.experienceSince ? new Date().getFullYear() - agent.experienceSince : null),
+                brokerPermitNo: agent.licenseNumber || agent.broker_permit_no || agent.license_number ||
+                    agent.compliances?.find(c => c.type === 'brn')?.value ||
+                    agent.rera_permit || agent.permit_number || agent.license || agent.brn,
 
                 // Additional Info
                 verified: agent.verified || agent.is_verified || agent.is_active || false,
-                description: agent.description || agent.bio || agent.about || agent.summary,
+                superagent: agent.superagent || agent.is_superagent || false,
+                description: agent.bio || agent.description || agent.about || agent.summary,
                 specializations: Array.isArray(agent.specializations) ? agent.specializations :
                     Array.isArray(agent.property_types) ? agent.property_types :
                         (agent.specialization ? [agent.specialization] : null),
 
                 // Activity & Status
-                lastActive: agent.last_active || agent.lastActive || agent.last_seen || agent.updated_at || agent.last_online,
+                lastActive: agent.last_active || agent.lastActive || agent.last_seen || agent.updated_at,
+                linkedinAddress: agent.linkedinAddress,
+                avgWhatsappResponseTime: agent.avgWhatsappResponseTime,
 
                 // Transaction Data
                 transactionHistory: transactions.length > 0 ? transactions : null,
                 totalDealVolume: agent.claimedTransactionsDealVolume || agent.total_deal_volume || agent.deal_volume,
                 totalTransactions: agent.claimedTransactionsCount || transactions.length || null,
+                avgSaleTransactionAmount: agent.claimedTransactionsAvgSaleAmount,
+                avgRentTransactionAmount: agent.claimedTransactionsAvgRentAmount,
             };
         } catch (err) {
-            log.warning('Failed to parse agent from __NEXT_DATA__', { error: err.message, stack: err.stack });
+            log.warning('Failed to parse agent from __NEXT_DATA__', {
+                error: err.message,
+                stack: err.stack,
+                agentIndex: index,
+                agentId: agent?.id,
+                agentName: agent?.name
+            });
             return null;
         }
     }).filter((agent, index) => {

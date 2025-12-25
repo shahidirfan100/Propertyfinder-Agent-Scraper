@@ -210,10 +210,20 @@ const parseNextDataAgents = (agents) => {
                 totalTransactions: agent.claimedTransactionsCount || transactions.length || null,
             };
         } catch (err) {
-            log.debug('Failed to parse agent from __NEXT_DATA__', { error: err.message });
+            log.warning('Failed to parse agent from __NEXT_DATA__', { error: err.message, stack: err.stack });
             return null;
         }
-    }).filter(agent => agent && (agent.profileUrl || agent.name));
+    }).filter((agent, index) => {
+        const isValid = agent && (agent.profileUrl || agent.name);
+        if (!isValid && agent) {
+            log.debug(`Agent ${index} filtered out:`, {
+                hasName: !!agent.name,
+                hasProfileUrl: !!agent.profileUrl,
+                agentId: agent.agentId
+            });
+        }
+        return isValid;
+    });
 };
 
 // ============================================================================

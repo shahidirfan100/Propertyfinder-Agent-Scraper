@@ -1,0 +1,16 @@
+{
+  "actorOutputSchemaVersion": 1,
+  "title": "PropertyFinder Agent Scraper Output",
+  "properties": {
+    "dataset": {
+      "type": "string",
+      "title": "Dataset",
+      "template": "{{links.apiDefaultDatasetUrl}}/items"
+    },
+    "keyValueStore": {
+      "type": "string",
+      "title": "Key-Value Store",
+      "template": "{{links.apiDefaultKeyValueStoreUrl}}/keys"
+    }
+  }
+}

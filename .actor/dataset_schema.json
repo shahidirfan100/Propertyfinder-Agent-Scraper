@@ -1,0 +1,93 @@
+{
+  "actorSpecification": 1,
+  "fields": {},
+  "views": {
+    "overview": {
+      "title": "Overview",
+      "transformation": {
+        "fields": [
+          "name",
+          "profileImage",
+          "company",
+          "phone",
+          "email",
+          "whatsapp",
+          "location",
+          "totalListings",
+          "rating",
+          "reviewsCount",
+          "experience",
+          "languages",
+          "specializations",
+          "verified",
+          "profileUrl"
+        ]
+      },
+      "display": {
+        "component": "table",
+        "properties": {
+          "name": {
+            "label": "Agent Name",
+            "format": "text"
+          },
+          "profileImage": {
+            "label": "Photo",
+            "format": "image"
+          },
+          "company": {
+            "label": "Company",
+            "format": "text"
+          },
+          "phone": {
+            "label": "Phone",
+            "format": "text"
+          },
+          "email": {
+            "label": "Email",
+            "format": "text"
+          },
+          "whatsapp": {
+            "label": "WhatsApp",
+            "format": "text"
+          },
+          "location": {
+            "label": "Location",
+            "format": "text"
+          },
+          "totalListings": {
+            "label": "Listings",
+            "format": "number"
+          },
+          "rating": {
+            "label": "Rating",
+            "format": "number"
+          },
+          "reviewsCount": {
+            "label": "Reviews",
+            "format": "number"
+          },
+          "experience": {
+            "label": "Experience (Years)",
+            "format": "number"
+          },
+          "languages": {
+            "label": "Languages",
+            "format": "array"
+          },
+          "specializations": {
+            "label": "Specializations",
+            "format": "array"
+          },
+          "verified": {
+            "label": "Verified",
+            "format": "boolean"
+          },
+          "profileUrl": {
+            "label": "Profile URL",
+            "format": "link"
+          }
+        }
+      }
+    }
+  }
+}

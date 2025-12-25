@@ -1,0 +1,595 @@
+// PropertyFinder.ae Agent Scraper - Production-Ready with API Detection
+import { Actor, log } from 'apify';
+import { CheerioCrawler, gotScraping } from 'crawlee';
+import { load } from 'cheerio';
+
+// ============================================================================
+// UTILITY FUNCTIONS
+// ============================================================================
+
+const cleanText = (text) => {
+    if (!text) return null;
+    const cleaned = String(text).replace(/\s+/g, ' ').trim();
+    return cleaned.length ? cleaned : null;
+};
+
+const toAbsoluteUrl = (href, base = 'https://www.propertyfinder.ae') => {
+    if (!href) return null;
+    try {
+        if (href.startsWith('http')) return href;
+        if (href.startsWith('//')) return 'https:' + href;
+        return new URL(href, base).href;
+    } catch {
+        return null;
+    }
+};
+
+const numberFromText = (text) => {
+    if (!text) return null;
+    const match = String(text).replace(/,/g, '').match(/[\d.]+/);
+    return match ? Number(match[0]) : null;
+};
+
+// ============================================================================
+// URL BUILDERS
+// ============================================================================
+
+const buildSearchUrl = ({ startUrl, location, language, specialization, page = 1 }) => {
+    if (startUrl) {
+        const url = new URL(startUrl);
+        url.searchParams.set('page', String(page));
+        return url.href;
+    }
+
+    // Base agent search URL
+    const url = new URL('https://www.propertyfinder.ae/en/find-agent/search');
+    url.searchParams.set('page', String(page));
+    
+    if (location) {
+        url.searchParams.set('l', location);
+    }
+    
+    if (language) {
+        url.searchParams.set('language', language);
+    }
+    
+    if (specialization) {
+        url.searchParams.set('specialization', specialization);
+    }
+    
+    return url.href;
+};
+
+// Build internal API URL (PropertyFinder uses internal APIs)
+const buildApiUrl = ({ location, language, page = 1, limit = 20 }) => {
+    // PropertyFinder typically uses an internal API endpoint
+    const url = new URL('https://www.propertyfinder.ae/en/api/brokers');
+    url.searchParams.set('page', String(page));
+    url.searchParams.set('limit', String(limit));
+    
+    if (location) {
+        url.searchParams.set('location', location);
+    }
+    
+    if (language) {
+        url.searchParams.set('language', language);
+    }
+    
+    return url.href;
+};
+
+
+// ============================================================================
+// PRIORITY 1: API EXTRACTION (Fastest & Most Reliable)
+// ============================================================================
+
+/**
+ * Try to fetch data from PropertyFinder's internal API
+ * This is the fastest and most reliable method
+ */
+const fetchFromApi = async (params, proxyUrl) => {
+    try {
+        const apiUrl = buildApiUrl(params);
+        log.info('Attempting API fetch', { apiUrl });
+        
+        const response = await gotScraping({
+            url: apiUrl,
+            method: 'GET',
+            headers: {
+                'accept': 'application/json, text/plain, */*',
+                'accept-language': 'en-US,en;q=0.9',
+                'referer': 'https://www.propertyfinder.ae/en/find-agent/search',
+                'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+                'x-requested-with': 'XMLHttpRequest',
+                'sec-ch-ua': '"Chromium";v="122", "Not(A:Brand";v="24", "Google Chrome";v="122"',
+                'sec-ch-ua-mobile': '?0',
+                'sec-ch-ua-platform': '"Windows"',
+                'sec-fetch-dest': 'empty',
+                'sec-fetch-mode': 'cors',
+                'sec-fetch-site': 'same-origin',
+            },
+            proxyUrl,
+            responseType: 'json',
+            timeout: { request: 30000 },
+        });
+
+        if (response.statusCode === 200 && response.body) {
+            const data = response.body;
+            
+            // Check various possible response structures
+            const agents = data.brokers || data.agents || data.data?.brokers || data.data?.agents || 
+                          data.results || data.items || [];
+            
+            if (Array.isArray(agents) && agents.length > 0) {
+                log.info('✓ Successfully extracted agents from API', { count: agents.length });
+                return parseApiAgents(agents);
+            }
+        }
+        
+        log.debug('API response did not contain expected agent data');
+        return null;
+    } catch (err) {
+        log.debug('API fetch failed', { error: err.message, url: buildApiUrl(params) });
+        return null;
+    }
+};
+
+/**
+ * Parse agent data from API response
+ */
+const parseApiAgents = (agents) => {
+    return agents.map(agent => {
+        const agentUrl = agent.url || agent.profile_url || agent.slug;
+        return {
+            name: agent.name || agent.full_name || agent.display_name || agent.first_name + ' ' + agent.last_name,
+            email: agent.email || agent.contact?.email,
+            phone: agent.phone || agent.mobile || agent.contact_number || agent.contact?.phone,
+            whatsapp: agent.whatsapp || agent.whatsapp_number || agent.contact?.whatsapp,
+            agentId: agent.id || agent.agent_id || agent.broker_id,
+            profileUrl: toAbsoluteUrl(agentUrl),
+            company: agent.broker?.name || agent.company?.name || agent.agency_name || agent.broker_name,
+            companyLogo: toAbsoluteUrl(agent.broker?.logo || agent.company?.logo || agent.broker_logo),
+            profileImage: toAbsoluteUrl(agent.image || agent.photo || agent.avatar || agent.profile_image),
+            location: agent.location?.name || agent.city || agent.area || agent.location,
+            totalListings: agent.total_listings || agent.property_count || agent.listings_count || agent.properties_count,
+            activeListings: agent.active_listings || agent.active_properties,
+            verified: agent.verified || agent.is_verified || agent.is_active || false,
+            languages: Array.isArray(agent.languages) ? agent.languages : 
+                      (agent.languages ? [agent.languages] : []),
+            nationality: agent.nationality?.name || agent.nationality,
+            experience: agent.experience_years || agent.years_of_experience || agent.experience,
+            specializations: Array.isArray(agent.specializations) ? agent.specializations :
+                           Array.isArray(agent.property_types) ? agent.property_types : [],
+            rating: agent.rating || agent.average_rating || agent.score,
+            reviewsCount: agent.reviews_count || agent.total_reviews || agent.review_count,
+            brokerPermitNo: agent.broker_permit_no || agent.rera_permit || agent.license_number || agent.permit_number,
+            lastActive: agent.last_active || agent.last_seen || agent.updated_at,
+            description: agent.description || agent.bio || agent.about,
+        };
+    }).filter(a => a.profileUrl || a.name);
+};
+const extractNextData = (html) => {
+    try {
+        const match = html.match(/<script id="__NEXT_DATA__"[^>]*>(.*?)<\/script>/s);
+        if (!match) return null;
+
+        const data = JSON.parse(match[1]);
+        const agents = data?.props?.pageProps?.agents || data?.props?.pageProps?.searchResult?.agents;
+
+        if (!Array.isArray(agents) || !agents.length) return null;
+
+        log.info('Extracted agents from __NEXT_DATA__', { count: agents.length });
+
+        return agents.map(agent => {
+            const agentUrl = agent.slug || agent.url || agent.profile_url;
+            return {
+                name: agent.name || agent.full_name || agent.display_name,
+                email: agent.email,
+                phone: agent.phone || agent.mobile || agent.contact_number,
+                whatsapp: agent.whatsapp || agent.whatsapp_number,
+                agentId: agent.id || agent.agent_id,
+                profileUrl: toAbsoluteUrl(agentUrl),
+                company: agent.broker?.name || agent.company?.name || agent.agency_name,
+                companyLogo: toAbsoluteUrl(agent.broker?.logo || agent.company?.logo),
+                profileImage: toAbsoluteUrl(agent.image || agent.photo || agent.avatar),
+                location: agent.location?.name || agent.city || agent.area,
+                totalListings: agent.total_listings || agent.property_count || agent.listings_count,
+                activeListings: agent.active_listings,
+                verified: agent.verified || agent.is_verified || false,
+                languages: Array.isArray(agent.languages) ? agent.languages : [],
+                nationality: agent.nationality,
+                experience: agent.experience_years || agent.years_of_experience,
+                specializations: Array.isArray(agent.specializations) ? agent.specializations : [],
+                rating: agent.rating || agent.average_rating,
+                reviewsCount: agent.reviews_count || agent.total_reviews,
+                brokerPermitNo: agent.broker_permit_no || agent.rera_permit || agent.license_number,
+                lastActive: agent.last_active || agent.last_seen,
+            };
+        }).filter(a => a.profileUrl || a.name); // Only keep agents with valid data
+    } catch (err) {
+        log.debug('__NEXT_DATA__ extraction failed', { error: err.message });
+        return null;
+    }
+};
+
+// Extract agent cards from HTML (Fallback)
+const extractAgentCards = ($) => {
+    const cards = [];
+
+    // Priority 1: Use data-testid or semantic selectors for agent cards
+    $('article[data-testid*="agent"], div[class*="agent-card"], div[class*="AgentCard"]').each((_, el) => {
+        try {
+            const card = $(el);
+
+            const link = card.find('a[href*="/agent/"]').first().attr('href');
+            const profileUrl = toAbsoluteUrl(link);
+            if (!profileUrl) return;
+
+            const name = cleanText(
+                card.find('[data-testid*="agent-name"], h3, h4, [class*="agent-name"]').first().text()
+            );
+            
+            const company = cleanText(
+                card.find('[data-testid*="company"], [class*="company"], [class*="broker"]').first().text()
+            );
+
+            const phone = cleanText(
+                card.find('[data-testid*="phone"], [class*="phone"], a[href^="tel:"]').first().text() ||
+                card.find('a[href^="tel:"]').first().attr('href')?.replace('tel:', '')
+            );
+
+            const email = cleanText(
+                card.find('[data-testid*="email"], [class*="email"], a[href^="mailto:"]').first().text() ||
+                card.find('a[href^="mailto:"]').first().attr('href')?.replace('mailto:', '')
+            );
+
+            const whatsapp = cleanText(
+                card.find('[data-testid*="whatsapp"], [class*="whatsapp"]').first().text() ||
+                card.find('a[href*="wa.me"], a[href*="whatsapp"]').first().attr('href')?.match(/\d+/)?.[0]
+            );
+
+            const profileImage = toAbsoluteUrl(
+                card.find('img').first().attr('src') || card.find('img').first().attr('data-src')
+            );
+
+            const location = cleanText(
+                card.find('[data-testid*="location"], [class*="location"], [class*="area"]').first().text()
+            );
+
+            const totalListings = numberFromText(
+                card.find('[data-testid*="listing"], [class*="listing"], [class*="property-count"]').first().text()
+            );
+
+            const rating = numberFromText(
+                card.find('[data-testid*="rating"], [class*="rating"]').first().text()
+            );
+
+            const languages = [];
+            card.find('[data-testid*="language"], [class*="language"]').each((_, lang) => {
+                const langText = cleanText($(lang).text());
+                if (langText) languages.push(langText);
+            });
+
+            cards.push({
+                name,
+                email,
+                phone,
+                whatsapp,
+                profileUrl,
+                company,
+                profileImage,
+                location,
+                totalListings,
+                rating,
+                languages: languages.length ? languages : null,
+            });
+        } catch (err) {
+            log.debug('Failed to extract agent card', { error: err.message });
+        }
+    });
+
+    // Fallback: Try generic selectors if no agent cards found
+    if (!cards.length) {
+        log.warning('No agent cards found with specific selectors, trying generic approach');
+    }
+
+    return cards;
+};
+
+const extractJsonLd = ($) => {
+    try {
+        const scripts = $('script[type="application/ld+json"]').toArray().slice(0, 5);
+        for (const script of scripts) {
+            const content = $(script).contents().text();
+            if (!content) continue;
+            try {
+                const parsed = JSON.parse(content);
+                const candidate = Array.isArray(parsed) ? parsed[0] : parsed;
+                if (!candidate || typeof candidate !== 'object') continue;
+                if (candidate['@type'] && /Person|RealEstateAgent/i.test(candidate['@type'])) {
+                    return {
+                        name: candidate.name,
+                        email: candidate.email,
+                        phone: candidate.telephone,
+                        profileUrl: candidate.url,
+                        company: candidate.worksFor?.name || candidate.affiliation?.name,
+                        location: candidate.address?.addressLocality || candidate.workLocation,
+                        jobTitle: candidate.jobTitle,
+                        nationality: candidate.nationality?.name,
+                    };
+                }
+            } catch {
+                continue;
+            }
+        }
+    } catch (err) {
+        log.debug('JSON-LD extraction failed', { error: err.message });
+    }
+    return null;
+};
+
+const extractDetailFromHtml = ($, url) => {
+    const name = cleanText(
+        $('h1, [data-testid*="agent-name"], [class*="agent-name"]').first().text()
+    );
+
+    const email = cleanText(
+        $('[data-testid*="email"], [class*="email"], a[href^="mailto:"]').first().text() ||
+        $('a[href^="mailto:"]').first().attr('href')?.replace('mailto:', '')
+    );
+
+    const phone = cleanText(
+        $('[data-testid*="phone"], [class*="phone"], a[href^="tel:"]').first().text() ||
+        $('a[href^="tel:"]').first().attr('href')?.replace('tel:', '') ||
+        $('meta[itemprop="telephone"]').attr('content')
+    );
+
+    const whatsapp = cleanText(
+        $('[data-testid*="whatsapp"], [class*="whatsapp"]').first().text() ||
+        $('a[href*="wa.me"], a[href*="whatsapp"]').first().attr('href')?.match(/\d+/)?.[0]
+    );
+
+    const company = cleanText(
+        $('[data-testid*="company"], [class*="company"], [class*="broker"], [class*="agency"]').first().text() ||
+        $('meta[property="og:site_name"]').attr('content')
+    );
+
+    const location = cleanText(
+        $('[data-testid*="location"], [class*="location"], [class*="area"]').first().text() ||
+        $('meta[itemprop="address"]').attr('content')
+    );
+
+    const profileImage = toAbsoluteUrl(
+        $('img[alt*="agent"], img[class*="profile"], img[class*="avatar"]').first().attr('src') ||
+        $('meta[property="og:image"]').attr('content')
+    );
+
+    const totalListings = numberFromText(
+        $('[data-testid*="listing"], [class*="listing-count"], [class*="property-count"]').first().text()
+    );
+
+    const description = cleanText(
+        $('[data-testid*="bio"], [data-testid*="description"], [class*="bio"], [class*="about"]').text() ||
+        $('meta[name="description"]').attr('content')
+    );
+
+    const languages = [];
+    $('[data-testid*="language"], [class*="language"]').each((_, lang) => {
+        const langText = cleanText($(lang).text());
+        if (langText) languages.push(langText);
+    });
+
+    const specializations = [];
+    $('[data-testid*="specialization"], [class*="specialization"], [class*="expertise"]').each((_, spec) => {
+        const specText = cleanText($(spec).text());
+        if (specText) specializations.push(specText);
+    });
+
+    const rating = numberFromText(
+        $('[data-testid*="rating"], [class*="rating"]').first().text()
+    );
+
+    const reviewsCount = numberFromText(
+        $('[data-testid*="review"], [class*="review-count"]').first().text()
+    );
+
+    const experience = numberFromText(
+        $('[data-testid*="experience"], [class*="experience"], [class*="years"]').first().text()
+    );
+
+    const brokerPermitNo = cleanText(
+        $('[data-testid*="permit"], [data-testid*="license"], [class*="permit"], [class*="rera"]').first().text()
+    );
+
+    return {
+        name,
+        email,
+        phone,
+        whatsapp,
+        company,
+        location,
+        profileImage,
+        totalListings,
+        description,
+        languages: languages.length ? languages : null,
+        specializations: specializations.length ? specializations : null,
+        rating,
+        reviewsCount,
+        experience,
+        brokerPermitNo,
+        profileUrl: url,
+    };
+};
+
+const fetchDetailWithCheerio = async (url, proxyUrl) => {
+    const $ = load(await Actor.sendRequest({
+        url,
+        proxyUrl,
+        headers: {
+            'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122 Safari/537.36',
+            'accept-language': 'en-US,en;q=0.9',
+        },
+    }).then(r => r.body));
+
+    const jsonLd = extractJsonLd($) || {};
+    const htmlData = extractDetailFromHtml($, url);
+    return { ...htmlData, ...jsonLd, profileUrl: url };
+};
+
+await Actor.init();
+
+async function main() {
+    const input = (await Actor.getInput()) || {};
+    const {
+        startUrl,
+        location,
+        language,
+        specialization,
+        results_wanted: resultsWantedRaw = 100,
+        max_pages: maxPagesRaw = 20,
+        collectDetails = true,
+        proxyConfiguration,
+    } = input;
+
+    if (!startUrl && !location) {
+        log.warning('No startUrl or location provided, using default agent search');
+    }
+
+    const RESULTS_WANTED = Number.isFinite(+resultsWantedRaw)
+        ? Math.max(1, +resultsWantedRaw)
+        : Number.MAX_SAFE_INTEGER;
+    const MAX_PAGES = Number.isFinite(+maxPagesRaw) ? Math.max(1, +maxPagesRaw) : 20;
+
+    let proxyConfig;
+    let proxyUrl;
+    try {
+        proxyConfig = await Actor.createProxyConfiguration(proxyConfiguration || {});
+        const proxyInfo = await proxyConfig.newProxyInfo();
+        proxyUrl = proxyInfo?.url;
+    } catch (err) {
+        log.warning('Proxy configuration invalid; proceeding without proxy', { error: err.message });
+    }
+
+    log.info('Starting PropertyFinder Agent Scraper (HTTP + JSON extraction)', {
+        location,
+        language,
+        specialization,
+        resultsWanted: RESULTS_WANTED,
+        maxPages: MAX_PAGES,
+        collectDetails,
+    });
+
+    const seenUrls = new Set();
+    const enqueuedPages = new Set();
+    let totalSaved = 0;
+
+    const crawler = new CheerioCrawler({
+        proxyConfiguration: proxyConfig,
+        maxConcurrency: 5,
+        maxRequestRetries: 3,
+        requestHandlerTimeoutSecs: 90,
+
+        async requestHandler({ $, request, body }) {
+            const pageNo = request.userData.pageNo || 1;
+            const html = body.toString();
+
+            // Priority 1: Try __NEXT_DATA__ extraction
+            let agents = extractNextData(html);
+
+            // Priority 2: Fallback to HTML parsing
+            if (!agents || !agents.length) {
+                agents = extractAgentCards($);
+                if (agents.length) {
+                    log.info('Extracted agents from HTML', { count: agents.length, pageNo });
+                }
+            }
+
+            if (!agents || !agents.length) {
+                log.warning('No agents found on page', { url: request.url, pageNo });
+                return;
+            }
+
+            for (const agent of agents) {
+                const agentUrl = agent.profileUrl;
+                if (!agentUrl || seenUrls.has(agentUrl)) continue;
+                seenUrls.add(agentUrl);
+
+                const baseRecord = {
+                    ...agent,
+                    profileUrl: agentUrl,
+                };
+
+                if (!collectDetails) {
+                    await Actor.pushData(baseRecord);
+                    totalSaved++;
+                    if (totalSaved >= RESULTS_WANTED) {
+                        log.info('Reached desired results from listings only', { totalSaved });
+                        await crawler.autoscaledPool?.abort();
+                        return;
+                    }
+                    continue;
+                }
+
+                try {
+                    const detailData = await fetchDetailWithCheerio(agentUrl, proxyUrl);
+                    const record = { ...baseRecord, ...detailData };
+                    await Actor.pushData(record);
+                    totalSaved++;
+                    log.info('Saved agent profile', { url: agentUrl, totalSaved });
+                } catch (err) {
+                    log.warning('Detail fetch failed, saving listing data only', { url: agentUrl, error: err.message });
+                    await Actor.pushData(baseRecord);
+                    totalSaved++;
+                }
+
+                if (totalSaved >= RESULTS_WANTED) {
+                    log.info('Reached desired results', { totalSaved });
+                    await crawler.autoscaledPool?.abort();
+                    return;
+                }
+            }
+
+            // Pagination
+            if (pageNo < MAX_PAGES && totalSaved < RESULTS_WANTED) {
+                const nextPage = pageNo + 1;
+                const nextUrl = buildSearchUrl({
+                    startUrl,
+                    location,
+                    page: nextPage,
+                });
+                if (!enqueuedPages.has(nextUrl)) {
+                    enqueuedPages.add(nextUrl);
+                    await crawler.addRequests([{ url: nextUrl, userData: { pageNo: nextPage } }]);
+                    log.info('Enqueued next page', { nextPage, url: nextUrl });
+                }
+            }
+        },
+    });
+
+    const initialUrl = buildSearchUrl({
+        startUrl,
+        location,
+        page: 1,
+    });
+    enqueuedPages.add(initialUrl);
+
+    log.info('Starting with URL', { url: initialUrl });
+
+    await crawler.run([
+        {
+            url: initialUrl,
+            userData: { pageNo: 1 },
+        },
+    ]);
+
+    log.info('Scraping completed', { totalSaved });
+}
+
+main()
+    .catch((err) => {
+        log.exception(err, 'Fatal error');
+        process.exit(1);
+    })
+    .finally(async () => {
+        await Actor.exit();
+    });

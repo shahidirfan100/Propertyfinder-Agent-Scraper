@@ -1,0 +1,18 @@
+{
+  "actorSpecification": 1,
+  "name": "propertyfinder-agent-scraper",
+  "title": "PropertyFinder Agent Scraper",
+  "version": "1.0.0",
+  "buildTag": "latest",
+  "dockerfile": "../Dockerfile",
+  "readme": "../README.md",
+  "input": "./input_schema.json",
+  "output": "./output_schema.json",
+  "meta": {
+    "generatedBy": "claude-sonnet-4.5"
+  },
+  "nodeJsVersion": "22",
+  "storages": {
+    "dataset": "./dataset_schema.json"
+  }
+}

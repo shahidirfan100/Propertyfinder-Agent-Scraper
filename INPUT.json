@@ -1,0 +1,12 @@
+{
+  "location": "Dubai",
+  "language": "",
+  "specialization": "",
+  "results_wanted": 100,
+  "max_pages": 20,
+  "collectDetails": true,
+  "proxyConfiguration": {
+    "useApifyProxy": true,
+    "apifyProxyGroups": ["RESIDENTIAL"]
+  }
+}

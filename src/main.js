@@ -30,8 +30,14 @@ const numberFromText = (text) => {
     return match ? Number(match[0]) : null;
 };
 
-const randomDelay = (min = 500, max = 2000) => {
+const randomDelay = (min = 100, max = 500) => {
     return new Promise(resolve => setTimeout(resolve, Math.random() * (max - min) + min));
+};
+
+const getAdaptiveDelay = (concurrency) => {
+    const baseMin = Math.max(50, 200 / concurrency);
+    const baseMax = Math.max(200, 500 / concurrency);
+    return randomDelay(baseMin, baseMax);
 };
 
 // ============================================================================
@@ -126,9 +132,7 @@ const extractNextData = (html) => {
             return null;
         }
 
-        log.info(`✅ __NEXT_DATA__ raw data: ${agentArray.length} agents found`);
         const parsedAgents = parseNextDataAgents(agentArray);
-        log.info(`✅ __NEXT_DATA__ after parsing: ${parsedAgents.length} agents ready to save`);
 
         if (parsedAgents.length === 0 && agentArray.length > 0) {
             log.warning('⚠️ All agents filtered out during parsing!', {
@@ -430,15 +434,15 @@ const extractAgentFromCard = ($, card) => {
 // DETAIL PAGE EXTRACTION
 // ============================================================================
 
-const fetchDetailWithCheerio = async (url, proxyUrl) => {
+const fetchDetailWithCheerio = async (url, proxyUrl, delayMs = 0) => {
     try {
-        await randomDelay(300, 1000); // Anti-bot delay
+        if (delayMs > 0) await randomDelay(delayMs, delayMs + 100);
 
         const response = await gotScraping({
             url,
             proxyUrl,
             headers: getStealthHeaders(url),
-            timeout: { request: 30000 },
+            timeout: { request: 15000 },
             retry: { limit: 2 },
         });
 
@@ -447,7 +451,6 @@ const fetchDetailWithCheerio = async (url, proxyUrl) => {
         // Priority 1: Try __NEXT_DATA__ first (most complete)
         const nextDataAgents = extractNextData(response.body);
         if (nextDataAgents && nextDataAgents.length > 0) {
-            log.debug('✓ Detail page: extracted from __NEXT_DATA__');
             return nextDataAgents[0];
         }
 
@@ -663,10 +666,10 @@ async function main() {
 
     const crawler = new CheerioCrawler({
         proxyConfiguration: proxyConfig,
-        maxConcurrency: 2, // Reduced for stealth
-        minConcurrency: 1,
+        maxConcurrency: 8,
+        minConcurrency: 2,
         maxRequestRetries: 3,
-        requestHandlerTimeoutSecs: 120,
+        requestHandlerTimeoutSecs: 180,
 
         async requestHandler({ $, request, body }) {
             const pageNo = request.userData.pageNo || 1;
@@ -675,17 +678,11 @@ async function main() {
             stats.pagesProcessed++;
             log.info(`📄 Processing page ${pageNo}...`);
 
-            // Add delay between pages for stealth
-            if (pageNo > 1) {
-                await randomDelay(800, 1500);
-            }
-
             // Priority 1: Try __NEXT_DATA__ extraction (FASTEST & MOST COMPLETE)
             let agents = extractNextData(html);
 
             // Priority 2: Fallback to HTML parsing (if __NEXT_DATA__ fails)
             if (!agents || agents.length === 0) {
-                log.debug('⚠️ __NEXT_DATA__ failed, falling back to HTML parsing');
                 agents = extractAgentCards($);
             }
 
@@ -701,55 +698,57 @@ async function main() {
                 return;
             }
 
-            // Reset empty page counter
             emptyPageCount = 0;
             stats.agentsFound += agents.length;
-            log.info(`✓ Found ${agents.length} agents on page ${pageNo} (Total: ${stats.agentsFound})`);
+            log.info(`✓ Page ${pageNo}: ${agents.length} agents (Total: ${stats.agentsFound})`);
 
-            for (const agent of agents) {
-                if (totalSaved >= RESULTS_WANTED) {
-                    log.info(`🎯 Target reached: ${totalSaved}/${RESULTS_WANTED} agents saved`);
-                    await crawler.autoscaledPool?.abort();
-                    return;
-                }
+            // Parallel detail page fetching with batching
+            const detailPromises = agents.map(async (agent, index) => {
+                if (totalSaved >= RESULTS_WANTED) return null;
 
                 const agentUrl = agent.profileUrl;
-                if (!agentUrl || seenUrls.has(agentUrl)) continue;
+                if (!agentUrl || seenUrls.has(agentUrl)) return null;
                 seenUrls.add(agentUrl);
 
                 let finalRecord = { ...agent };
 
-                // Check if we need detail page (skip if listing data is already complete)
                 const listingCompleteness = calculateCompleteness(agent);
                 const needsDetail = collectDetails && listingCompleteness.percentage < 90;
 
                 if (needsDetail && agentUrl) {
                     try {
-                        log.debug(`Fetching detail page: ${agentUrl}`);
-                        const detailData = await fetchDetailWithCheerio(agentUrl, proxyUrl);
+                        const staggerDelay = index * 50;
+                        const detailData = await fetchDetailWithCheerio(agentUrl, proxyUrl, staggerDelay);
                         finalRecord = mergeAgentData(agent, detailData);
                     } catch (err) {
-                        log.warning('Detail fetch failed, using listing data', {
-                            url: agentUrl,
-                            error: err.message
-                        });
+                        // Silent error handling - use listing data
                     }
                 }
 
-                // Calculate final completeness
-                const completeness = calculateCompleteness(finalRecord);
-                stats.dataCompleteness.push(completeness.percentage);
+                return finalRecord;
+            });
 
-                // Save the agent
-                await Actor.pushData(finalRecord);
-                totalSaved++;
+            const results = await Promise.allSettled(detailPromises);
 
-                log.info(`✓ Saved agent ${totalSaved}/${RESULTS_WANTED}`, {
-                    name: finalRecord.name,
-                    completeness: `${completeness.percentage}%`,
-                    email: finalRecord.email ? '✓' : '✗',
-                    phone: finalRecord.phone ? '✓' : '✗',
-                });
+            for (const result of results) {
+                if (result.status === 'fulfilled' && result.value) {
+                    const finalRecord = result.value;
+                    const completeness = calculateCompleteness(finalRecord);
+                    stats.dataCompleteness.push(completeness.percentage);
+
+                    await Actor.pushData(finalRecord);
+                    totalSaved++;
+
+                    if (totalSaved % 10 === 0 || totalSaved >= RESULTS_WANTED) {
+                        log.info(`✓ Saved ${totalSaved}/${RESULTS_WANTED} agents | Avg: ${Math.round(stats.dataCompleteness.reduce((a, b) => a + b, 0) / stats.dataCompleteness.length)}%`);
+                    }
+
+                    if (totalSaved >= RESULTS_WANTED) {
+                        log.info(`🎯 Target reached: ${totalSaved} agents`);
+                        await crawler.autoscaledPool?.abort();
+                        break;
+                    }
+                }
             }
 
             // Pagination

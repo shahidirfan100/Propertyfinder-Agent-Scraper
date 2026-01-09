@@ -623,9 +623,9 @@ async function main() {
         location,
         language,
         specialization,
-        results_wanted: resultsWantedRaw = 100,
+        results_wanted: resultsWantedRaw = 20,
         max_pages: maxPagesRaw = 20,
-        collectDetails = true,
+        collectDetails = false,
         proxyConfiguration,
     } = input;
 

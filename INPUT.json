@@ -2,11 +2,13 @@
   "location": "Dubai",
   "language": "",
   "specialization": "",
-  "results_wanted": 100,
+  "results_wanted": 20,
   "max_pages": 20,
-  "collectDetails": true,
+  "collectDetails": false,
   "proxyConfiguration": {
     "useApifyProxy": true,
-    "apifyProxyGroups": ["RESIDENTIAL"]
+    "apifyProxyGroups": [
+      "RESIDENTIAL"
+    ]
   }
 }
